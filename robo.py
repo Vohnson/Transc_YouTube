@@ -422,7 +422,7 @@ def generate_channel_analysis(video_details_list, channel_name, sucessos_com_tra
         return False
 
 def main():
-    API_KEY = 'AIzaSyCItptfGsY26-Ux94bH2-FpfyO5VpoDxhs'
+    API_KEY = 'SUA API KEY AQUI'
     youtube = check_api_key(API_KEY)
     
     print("Digite a URL do canal do YouTube: ", end='')
