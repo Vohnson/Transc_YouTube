@@ -8,6 +8,7 @@ from tqdm import tqdm
 import time
 import re
 import sys
+import json
 
 def check_api_key(api_key):
     """Verifica se a chave API está funcionando."""
@@ -15,337 +16,399 @@ def check_api_key(api_key):
         youtube = build('youtube', 'v3', developerKey=api_key)
         request = youtube.channels().list(
             part='id',
-            id='UC_x5XG1OV2P6uZZ5FSM9Ttw'  # Canal do Google Developers
+            id='UC_x5XG1OV2P6uZZ5FSM9Ttw'
         )
         request.execute()
-        return True, youtube
+        return youtube
     except HttpError as e:
-        if e.resp.status == 403:
-            print("Erro: Chave API inválida ou sem permissões adequadas.")
-        else:
-            print(f"Erro ao verificar a chave API: {str(e)}")
-        return False, None
+        print(f"Erro na API do YouTube: {str(e)}")
+        sys.exit(1)
     except Exception as e:
-        print(f"Erro inesperado ao verificar a chave API: {str(e)}")
-        return False, None
+        print(f"Erro inesperado: {str(e)}")
+        sys.exit(1)
 
 def get_channel_info(youtube, channel_url):
     """Obtém ID e nome do canal."""
     try:
-        print("Analisando URL do canal...")
-        
+        print("\nObtendo informações do canal...")
         if '@' in channel_url:
-            handle = channel_url.split('@')[-1]
-            print(f"Buscando canal pelo handle: @{handle}")
+            handle = channel_url.split('@')[1]
+            request = youtube.channels().list(
+                part='snippet',
+                forHandle=handle
+            )
+            response = request.execute()
             
-            try:
-                request = youtube.channels().list(
-                    part='snippet',
-                    forHandle=handle
-                )
-                response = request.execute()
-                
-                if 'items' in response and len(response['items']) > 0:
-                    channel_id = response['items'][0]['id']
-                    channel_name = response['items'][0]['snippet']['title']
-                    print(f"Canal encontrado: {channel_name}")
-                    return channel_id, channel_name
-                else:
-                    raise Exception("Canal não encontrado com este handle")
-                    
-            except HttpError:
-                print("Erro ao buscar pelo handle, tentando método alternativo...")
-                request = youtube.search().list(
-                    part='snippet',
-                    q=handle,
-                    type='channel',
-                    maxResults=1
-                )
-                response = request.execute()
-                
-                if 'items' in response and len(response['items']) > 0:
-                    channel_id = response['items'][0]['snippet']['channelId']
-                    channel_name = response['items'][0]['snippet']['title']
-                    print(f"Canal encontrado: {channel_name}")
-                    return channel_id, channel_name
-                else:
-                    raise Exception("Canal não encontrado")
-        
-        raise Exception("Formato de URL não suportado")
-        
+            if 'items' in response and len(response['items']) > 0:
+                channel_id = response['items'][0]['id']
+                channel_name = response['items'][0]['snippet']['title']
+                print(f"Canal encontrado: {channel_name}")
+                return channel_id, channel_name
+            else:
+                raise Exception("Canal não encontrado")
     except Exception as e:
         print(f"Erro ao obter informações do canal: {str(e)}")
         sys.exit(1)
 
 def get_video_ids(youtube, channel_id):
-    """Obtém IDs dos vídeos usando um método alternativo."""
+    """Obtém lista de IDs dos vídeos do canal usando playlists de uploads."""
     try:
-        videos = []
-        next_page_token = None
-        page_count = 0
+        # Primeiro, obtém a playlist de uploads do canal
+        request = youtube.channels().list(
+            part='contentDetails',
+            id=channel_id
+        )
+        response = request.execute()
         
-        print("\nColetando lista de vídeos do canal...")
+        playlist_id = response['items'][0]['contentDetails']['relatedPlaylists']['uploads']
+        
+        print("\nObtendo lista de vídeos do canal...")
+        video_ids = []
+        next_page_token = None
+        total_processed = 0
         
         while True:
-            page_count += 1
-            print(f"Buscando página {page_count} de vídeos...")
-            
-            request = youtube.search().list(
-                part='id',
-                channelId=channel_id,
-                maxResults=50,
-                pageToken=next_page_token,
-                type='video',
-                order='date'
+            # Obtém vídeos da playlist de uploads
+            request = youtube.playlistItems().list(
+                part='snippet',
+                playlistId=playlist_id,
+                maxResults=50,  # Máximo permitido por requisição
+                pageToken=next_page_token
             )
             response = request.execute()
             
+            # Adiciona IDs dos vídeos à lista
             for item in response['items']:
-                if item['id']['kind'] == 'youtube#video':
-                    videos.append(item['id']['videoId'])
+                video_ids.append(item['snippet']['resourceId']['videoId'])
+                total_processed += 1
+                if total_processed % 50 == 0:
+                    print(f"Encontrados {total_processed} vídeos...")
             
-            print(f"Encontrados {len(videos)} vídeos até agora...")
-            
+            # Verifica se há mais páginas
             next_page_token = response.get('nextPageToken')
             if not next_page_token:
                 break
             
-            time.sleep(0.5)
-            
-        return videos
+            time.sleep(0.5)  # Pequena pausa para evitar atingir limites da API
+        
+        print(f"Total de vídeos encontrados: {len(video_ids)}")
+        return video_ids
     except Exception as e:
         print(f"Erro ao obter lista de vídeos: {str(e)}")
         return []
 
-def get_video_title(youtube, video_id):
-    """Obtém o título do vídeo pelo ID."""
-    request = youtube.videos().list(
-        part='snippet',
-        id=video_id
-    )
-    response = request.execute()
-    return response['items'][0]['snippet']['title']
-
-def sanitize_folder_name(name):
-    """Remove caracteres inválidos do nome da pasta."""
-    name = re.sub(r'[<>:"/\\|?*]', '', name)
-    name = re.sub(r'\s+', ' ', name).strip()
-    return name
-
-def save_transcript_single(video_id, title, output_dir):
-    """Salva a transcrição de um vídeo em um arquivo txt individual."""
+def get_video_details(youtube, video_id):
+    """Obtém detalhes completos do vídeo."""
     try:
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        video_response = youtube.videos().list(
+            part='snippet,statistics',
+            id=video_id
+        ).execute()
         
-        try:
-            transcript = transcript_list.find_transcript(['pt'])
-        except NoTranscriptFound:
-            try:
-                transcript = transcript_list.find_transcript(['pt-BR'])
-            except NoTranscriptFound:
-                try:
-                    transcript = transcript_list.find_transcript(['en'])
-                    transcript = transcript.translate('pt')
-                except NoTranscriptFound:
-                    try:
-                        transcript = next(iter(transcript_list._manually_created_transcripts.values()))
-                        transcript = transcript.translate('pt')
-                    except:
-                        transcript = next(iter(transcript_list._generated_transcripts.values()))
-                        transcript = transcript.translate('pt')
+        video = video_response['items'][0]
+        snippet = video['snippet']
+        statistics = video['statistics']
+        
+        return {
+            'title': snippet['title'],
+            'description': snippet['description'],
+            'publish_date': snippet['publishedAt'].split('T')[0],
+            'views': statistics.get('viewCount', '0'),
+            'likes': statistics.get('likeCount', '0'),
+            'comments_count': statistics.get('commentCount', '0')
+        }
+    except Exception as e:
+        print(f"Erro ao obter detalhes do vídeo: {str(e)}")
+        return None
 
-        transcript_data = transcript.fetch()
+def get_video_comments(youtube, video_id, max_comments=100):
+    """Obtém os top comentários do vídeo ordenados por likes."""
+    try:
+        all_comments = []
+        next_page_token = None
         
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
+        # Coleta todos os comentários disponíveis (até um limite razoável)
+        while len(all_comments) < 500:  # Limitamos a 500 para não sobrecarregar
+            try:
+                request = youtube.commentThreads().list(
+                    part="snippet",
+                    videoId=video_id,
+                    maxResults=100,  # Máximo permitido pela API
+                    pageToken=next_page_token,
+                    textFormat="plainText",
+                    order="relevance"  # Ordena por relevância
+                )
+                response = request.execute()
+                
+                # Processa os comentários
+                for item in response['items']:
+                    comment = item['snippet']['topLevelComment']['snippet']
+                    all_comments.append({
+                        'author': comment['authorDisplayName'],
+                        'text': comment['textDisplay'],
+                        'likes': int(comment.get('likeCount', 0)),
+                        'date': comment['publishedAt'].split('T')[0]
+                    })
+                
+                # Verifica se há mais páginas
+                next_page_token = response.get('nextPageToken')
+                if not next_page_token:
+                    break
+                    
+            except Exception as e:
+                print(f"Erro ao obter página de comentários: {str(e)}")
+                break
         
-        valid_title = "".join(c for c in title if c.isalnum() or c in (' ','-','_')).rstrip()
-        valid_title = valid_title[:150]
+        # Ordena os comentários por número de likes (decrescente)
+        all_comments.sort(key=lambda x: x['likes'], reverse=True)
         
-        filename = os.path.join(output_dir, f"{valid_title}.txt")
+        # Retorna apenas os top 100 comentários
+        top_comments = all_comments[:max_comments]
         
-        with open(filename, 'w', encoding='utf-8') as f:
-            f.write(f"Título: {title}\n")
-            f.write(f"ID do Vídeo: {video_id}\n")
-            f.write(f"URL: https://www.youtube.com/watch?v={video_id}\n")
-            f.write("\nTRANSCRIÇÃO:\n\n")
-            
-            transcript_data.sort(key=lambda x: x['start'])
-            
-            for entry in transcript_data:
-                text = entry['text'].replace('\n', ' ')
-                start_time = int(entry['start'])
-                minutes = start_time // 60
-                seconds = start_time % 60
-                timestamp = f"{minutes:02d}:{seconds:02d}"
-                f.write(f"[{timestamp}] {text}\n")
+        # Adiciona ranking aos comentários
+        for i, comment in enumerate(top_comments, 1):
+            comment['ranking'] = i
         
-        return True, "Sucesso"
+        return top_comments
         
-    except TranscriptsDisabled:
-        return False, "Transcrições desativadas"
-    except NoTranscriptFound:
-        return False, "Nenhuma transcrição encontrada"
+    except Exception as e:
+        print(f"Erro ao obter comentários: {str(e)}")
+        return []
+
+def save_video_content(video_id, video_details, comments, output_file, include_description, include_comments):
+    """Função atualizada para incluir ranking nos comentários."""
+    try:
+        # [Código anterior permanece igual até a parte dos comentários]
+
+        # Comentários
+        if include_comments and comments:
+            f.write("\nTOP 100 COMENTÁRIOS (Por número de likes):\n")
+            for comment in comments:
+                f.write(f"\n#{comment['ranking']} - {comment['likes']} likes\n")
+                f.write(f"Autor: {comment['author']}\n")
+                f.write(f"Data: {comment['date']}\n")
+                f.write(f"Comentário: {comment['text']}\n")
+                f.write("-" * 50 + "\n")
+
+        # [Resto do código permanece igual]
+
     except Exception as e:
         return False, str(e)
 
-def save_transcript_combined(video_id, title, combined_file, first_video=False):
-    """Salva a transcrição em um arquivo combinado."""
+def save_video_content(video_id, video_details, comments, output_file, include_description, include_comments):
+    """Salva conteúdo do vídeo em arquivo com melhor tratamento de transcrições."""
     try:
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-        
+        # Tenta obter a transcrição em diferentes formatos
+        transcript_data = None
         try:
-            transcript = transcript_list.find_transcript(['pt'])
-        except NoTranscriptFound:
-            try:
-                transcript = transcript_list.find_transcript(['pt-BR'])
-            except NoTranscriptFound:
-                try:
-                    transcript = transcript_list.find_transcript(['en'])
-                    transcript = transcript.translate('pt')
-                except NoTranscriptFound:
-                    try:
-                        transcript = next(iter(transcript_list._manually_created_transcripts.values()))
-                        transcript = transcript.translate('pt')
-                    except:
-                        transcript = next(iter(transcript_list._generated_transcripts.values()))
-                        transcript = transcript.translate('pt')
-
-        transcript_data = transcript.fetch()
-        
-        mode = 'w' if first_video else 'a'
-        with open(combined_file, mode, encoding='utf-8') as f:
-            f.write(f"\n{'='*50}\n")
-            f.write(f"Título: {title}\n")
-            f.write(f"ID do Vídeo: {video_id}\n")
-            f.write(f"URL: https://www.youtube.com/watch?v={video_id}\n")
-            f.write("\nTRANSCRIÇÃO:\n\n")
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
             
+            # Tenta diferentes idiomas e tipos de transcrição
+            transcript = None
+            
+            # Lista de idiomas para tentar
+            languages = ['en', 'en-US', 'pt', 'pt-BR', 'es', 'fr', 'de']
+            
+            # Primeiro tenta transcrições manuais
+            for lang in languages:
+                try:
+                    transcript = transcript_list.find_manually_created_transcript([lang])
+                    break
+                except:
+                    continue
+            
+            # Se não encontrou manual, tenta as geradas automaticamente
+            if not transcript:
+                for lang in languages:
+                    try:
+                        transcript = transcript_list.find_generated_transcript([lang])
+                        break
+                    except:
+                        continue
+            
+            # Se ainda não encontrou, tenta qualquer transcrição disponível
+            if not transcript:
+                try:
+                    # Pega a primeira transcrição disponível, seja manual ou gerada
+                    available_transcripts = transcript_list.manual + transcript_list.generated
+                    if available_transcripts:
+                        transcript = available_transcripts[0]
+                except:
+                    pass
+            
+            if not transcript:
+                return False, f"Nenhuma transcrição encontrada (ID: {video_id})"
+            
+            # Se encontrou em outro idioma, traduz para inglês
+            if transcript.language_code != 'en':
+                try:
+                    transcript = transcript.translate('en')
+                except:
+                    pass  # Se não conseguir traduzir, usa a transcrição original
+            
+            transcript_data = transcript.fetch()
+            
+        except Exception as e:
+            return False, f"Erro ao obter transcrição: {str(e)}"
+
+        if not transcript_data:
+            return False, "Sem transcrição disponível"
+
+        with open(output_file, 'w', encoding='utf-8') as f:
+            # Informações básicas
+            f.write(f"Título: {video_details['title']}\n")
+            f.write(f"URL: https://www.youtube.com/watch?v={video_id}\n")
+            f.write(f"Data de Publicação: {video_details['publish_date']}\n")
+            f.write(f"Visualizações: {video_details['views']}\n")
+            f.write(f"Likes: {video_details['likes']}\n")
+            f.write(f"Quantidade de Comentários: {video_details['comments_count']}\n\n")
+
+            # Descrição
+            if include_description:
+                f.write("DESCRIÇÃO:\n")
+                f.write(f"{video_details['description']}\n\n")
+
+            # Transcrição
+            f.write("TRANSCRIÇÃO:\n")
+            
+            # Ordena por tempo e remove duplicatas
             transcript_data.sort(key=lambda x: x['start'])
+            seen_texts = set()
+            unique_transcript = []
             
             for entry in transcript_data:
-                text = entry['text'].replace('\n', ' ')
+                text = entry['text'].strip()
+                if text and text not in seen_texts:
+                    seen_texts.add(text)
+                    unique_transcript.append(entry)
+            
+            # Escreve a transcrição sem duplicatas
+            for entry in unique_transcript:
                 start_time = int(entry['start'])
                 minutes = start_time // 60
                 seconds = start_time % 60
-                timestamp = f"{minutes:02d}:{seconds:02d}"
-                f.write(f"[{timestamp}] {text}\n")
-            
-            f.write(f"\n{'='*50}\n")
-        
+                text = entry['text'].replace('\n', ' ').strip()
+                if text:  # Só escreve se tiver texto
+                    f.write(f"[{minutes:02d}:{seconds:02d}] {text}\n")
+
+            # Comentários
+            if include_comments and comments:
+                f.write("\nCOMENTÁRIOS:\n")
+                for comment in comments:
+                    f.write(f"\nAutor: {comment['author']}\n")
+                    f.write(f"Data: {comment['date']}\n")
+                    f.write(f"Likes: {comment['likes']}\n")
+                    f.write(f"Comentário: {comment['text']}\n")
+                    f.write("-" * 50 + "\n")
+
         return True, "Sucesso"
         
-    except TranscriptsDisabled:
-        return False, "Transcrições desativadas"
-    except NoTranscriptFound:
-        return False, "Nenhuma transcrição encontrada"
     except Exception as e:
         return False, str(e)
 
 def main():
+    # Sua chave API
     API_KEY = 'AIzaSyCItptfGsY26-Ux94bH2-FpfyO5VpoDxhs'
     
-    print("Verificando chave API...")
-    api_valid, youtube = check_api_key(API_KEY)
+    # Inicializa API
+    youtube = check_api_key(API_KEY)
     
-    if not api_valid:
-        print("Falha na verificação da chave API.")
-        sys.exit(1)
+    # Obtém URL do canal
+    print("Digite a URL do canal do YouTube: ", end='')
+    channel_url = input().strip()
     
-    try:
-        print("Digite a URL do canal do YouTube: ", end='')
-        channel_url = input().strip()
-        
-        if not channel_url:
-            print("URL não pode estar vazia!")
-            sys.exit(1)
+    # Obtém opções do usuário
+    while True:
+        print("\nComo você deseja salvar as transcrições?")
+        print("1 - Um arquivo para cada vídeo")
+        print("2 - Todas as transcrições em um único arquivo")
+        opcao = input("Escolha (1 ou 2): ").strip()
+        if opcao in ['1', '2']:
+            break
+    
+    while True:
+        print("\nDeseja incluir a descrição dos vídeos?")
+        print("1 - Sim")
+        print("2 - Não")
+        incluir_descricao = input("Escolha (1 ou 2): ").strip()
+        if incluir_descricao in ['1', '2']:
+            break
+    
+    while True:
+        print("\nDeseja incluir os comentários dos vídeos?")
+        print("1 - Sim")
+        print("2 - Não")
+        incluir_comentarios = input("Escolha (1 ou 2): ").strip()
+        if incluir_comentarios in ['1', '2']:
+            break
+    
+    # Processa opções
+    include_description = (incluir_descricao == '1')
+    include_comments = (incluir_comentarios == '1')
+    
+    # Obtém informações do canal
+    channel_id, channel_name = get_channel_info(youtube, channel_url)
+    
+    # Cria pasta para o canal
+    channel_folder = re.sub(r'[<>:"/\\|?*]', '', channel_name)
+    output_dir = os.path.join(os.getcwd(), channel_folder)
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Obtém lista de vídeos
+    print("\nObtendo lista de vídeos...")
+    videos = get_video_ids(youtube, channel_id)
+    total_videos = len(videos)
+    print(f"Total de vídeos encontrados: {total_videos}")
+    
+    # Processa vídeos
+    sucessos = 0
+    falhas = 0
+    
+    print("\nProcessando vídeos...")
+    for i, video_id in enumerate(tqdm(videos)):
+        try:
+            # Obtém detalhes do vídeo
+            video_details = get_video_details(youtube, video_id)
+            if not video_details:
+                continue
+                
+            # Obtém comentários se necessário
+            comments = get_video_comments(youtube, video_id) if include_comments else []
             
-        print(f"URL recebida: {channel_url}")
-        
-        # Obtém informações do canal
-        channel_id, channel_name = get_channel_info(youtube, channel_url)
-        
-        # Cria pasta com nome do canal
-        channel_folder = sanitize_folder_name(channel_name)
-        output_dir = os.path.join(os.getcwd(), channel_folder)
-        
-        # Pergunta ao usuário sobre o formato de salvamento
-        while True:
-            print("\nComo você deseja salvar as transcrições?")
-            print("1 - Um arquivo para cada vídeo")
-            print("2 - Todas as transcrições em um único arquivo")
-            opcao = input("Escolha (1 ou 2): ").strip()
+            # Define nome do arquivo
+            filename = f"{re.sub(r'[<>:"/\\|?*]', '', video_details['title'])[:150]}.txt"
+            output_file = os.path.join(output_dir, filename)
             
-            if opcao in ['1', '2']:
-                break
-            print("Opção inválida! Por favor, escolha 1 ou 2.")
-        
-        # Cria diretório se necessário
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
-            print(f"\nCriando pasta para o canal: {channel_folder}")
-        
-        # Obtém a lista de vídeos
-        videos = get_video_ids(youtube, channel_id)
-        
-        if not videos:
-            print("Nenhum vídeo encontrado no canal.")
-            sys.exit(1)
-        
-        total_videos = len(videos)
-        print(f"\nTotal de vídeos encontrados: {total_videos}")
-        
-        # Contadores para estatísticas
-        sucessos = 0
-        falhas = 0
-        erros = {}
-        
-        # Nome do arquivo combinado se necessário
-        combined_file = os.path.join(output_dir, f"{channel_folder}_todas_transcricoes.txt")
-        
-        # Processa cada vídeo com barra de progresso
-        print("\nBaixando transcrições...")
-        for idx, video_id in enumerate(tqdm(videos, desc="Progresso", unit="vídeo")):
-            title = get_video_title(youtube, video_id)
-            
-            if opcao == '1':
-                success, error_message = save_transcript_single(video_id, title, output_dir)
-            else:
-                success, error_message = save_transcript_combined(video_id, title, combined_file, idx == 0)
+            # Salva conteúdo
+            success, error = save_video_content(
+                video_id,
+                video_details,
+                comments,
+                output_file,
+                include_description,
+                include_comments
+            )
             
             if success:
                 sucessos += 1
             else:
                 falhas += 1
-                print(f"\nVídeo sem transcrição disponível: {title}")
-                print(f"Motivo: {error_message}")
-                
-                if error_message not in erros:
-                    erros[error_message] = 0
-                erros[error_message] += 1
+                print(f"\nErro no vídeo {video_details['title']}: {error}")
             
-            time.sleep(0.5)
+        except Exception as e:
+            falhas += 1
+            print(f"\nErro inesperado no vídeo {video_id}: {str(e)}")
         
-        # Relatório final
-        print("\n=== Relatório Final ===")
-        print(f"Canal: {channel_name}")
-        print(f"Total de vídeos processados: {total_videos}")
-        print(f"Transcrições baixadas com sucesso: {sucessos}")
-        print(f"Vídeos sem transcrição disponível: {falhas}")
-        print(f"Taxa de sucesso: {(sucessos/total_videos)*100:.2f}%")
-        
-        if erros:
-            print("\nTipos de erro encontrados:")
-            for erro, quantidade in erros.items():
-                print(f"- {erro}: {quantidade} vídeos")
-        
-        print(f"\nTranscrições salvas na pasta: {output_dir}")
-        if opcao == '2':
-            print(f"Arquivo único: {combined_file}")
-        
-    except Exception as e:
-        print(f"Erro inesperado: {str(e)}")
-        sys.exit(1)
+        time.sleep(0.5)  # Evita sobrecarga da API
+    
+    # Relatório final
+    print("\n=== Relatório Final ===")
+    print(f"Canal: {channel_name}")
+    print(f"Total de vídeos: {total_videos}")
+    print(f"Sucessos: {sucessos}")
+    print(f"Falhas: {falhas}")
+    print(f"Taxa de sucesso: {(sucessos/total_videos)*100:.2f}%")
+    print(f"\nArquivos salvos em: {output_dir}")
 
 if __name__ == "__main__":
     main()
