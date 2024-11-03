@@ -9,6 +9,7 @@ import time
 import re
 import sys
 import json
+BASE_SAVE_DIR = "dist/MeusSalvamentos"
 
 def check_api_key(api_key):
     """Verifica se a chave API está funcionando."""
@@ -270,6 +271,155 @@ def save_video_content(video_id, video_details, comments, channel_folder, includ
         
     except Exception as e:
         return False, str(e), None
+    
+def generate_channel_analysis(video_details_list, channel_name, sucessos_com_transcricao, sucessos_sem_transcricao, output_dir):
+    """Gera um relatório detalhado de análise do canal em formato Markdown."""
+    try:
+        # Coleta dados para análise
+        total_videos = len(video_details_list)
+        total_views = sum(int(v['views']) for v in video_details_list)
+        total_likes = sum(int(v['likes']) for v in video_details_list)
+        total_comments = sum(int(v['comments_count']) for v in video_details_list)
+        
+        # Calcula médias
+        avg_views = total_views / total_videos if total_videos > 0 else 0
+        avg_likes = total_likes / total_videos if total_videos > 0 else 0
+        avg_comments = total_comments / total_videos if total_videos > 0 else 0
+        
+        # Análise temporal
+        dates = [v['publish_date'] for v in video_details_list]
+        dates.sort()
+        oldest_date = dates[0]
+        newest_date = dates[-1]
+        
+        # Calcula frequência de postagem
+        from datetime import datetime
+        date_format = "%Y-%m-%d"
+        first_date = datetime.strptime(oldest_date, date_format)
+        last_date = datetime.strptime(newest_date, date_format)
+        days_between = (last_date - first_date).days
+        posts_per_week = (total_videos * 7) / days_between if days_between > 0 else 0
+        
+        # Análise de palavras (títulos e descrições)
+        import re
+        from collections import Counter
+        
+        def clean_text(text):
+            # Remove caracteres especiais e converte para minúsculas
+            text = re.sub(r'[^\w\s]', '', text.lower())
+            # Remove palavras comuns em inglês
+            stop_words = {'the', 'and', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'a', 'by', 'an', 'is', 'are'}
+            return ' '.join(word for word in text.split() if word not in stop_words and len(word) > 2)
+        
+        # Análise de títulos
+        all_titles = ' '.join(v['title'] for v in video_details_list)
+        clean_titles = clean_text(all_titles)
+        title_words = Counter(clean_titles.split()).most_common(20)
+        
+        # Análise de descrições
+        if any(v.get('description') for v in video_details_list):
+            all_descriptions = ' '.join(v.get('description', '') for v in video_details_list)
+            clean_descriptions = clean_text(all_descriptions)
+            desc_words = Counter(clean_descriptions.split()).most_common(20)
+        
+        # Gera o relatório em Markdown
+        report = f"""# 📊 Análise do Canal {channel_name}
+
+## 📈 Estatísticas Gerais
+
+### 🎥 Vídeos
+- Total de Vídeos: **{total_videos}**
+- Com Transcrição: **{sucessos_com_transcricao}** 📝
+- Sem Transcrição: **{sucessos_sem_transcricao}** ❌
+- Taxa de Vídeos com Transcrição: **{(sucessos_com_transcricao/total_videos)*100:.2f}%** 📊
+
+### 👁️ Visualizações
+- Total de Views: **{total_views:,}**
+- Média de Views por Vídeo: **{int(avg_views):,}**
+
+### ❤️ Engajamento
+- Total de Likes: **{total_likes:,}**
+- Média de Likes por Vídeo: **{int(avg_likes):,}**
+- Total de Comentários: **{total_comments:,}**
+- Média de Comentários por Vídeo: **{int(avg_comments):,}**
+
+## ⏰ Análise Temporal
+
+### 📅 Período de Atividade
+- Primeiro Vídeo: **{oldest_date}**
+- Vídeo Mais Recente: **{newest_date}**
+- Tempo de Canal: **{days_between} dias**
+
+### 📊 Frequência de Postagem
+- Média de **{posts_per_week:.1f}** vídeos por semana
+- Aproximadamente **{posts_per_week * 4:.1f}** vídeos por mês
+
+## 🔍 Análise de Conteúdo
+
+### 📝 Palavras Mais Frequentes nos Títulos
+"""
+        
+        # Adiciona as palavras mais frequentes dos títulos
+        for word, count in title_words:
+            report += f"- {word}: {count} vezes\n"
+        
+        if any(v.get('description') for v in video_details_list):
+            report += "\n### 📄 Palavras Mais Frequentes nas Descrições\n"
+            for word, count in desc_words[:10]:  # Limita a 10 palavras das descrições
+                report += f"- {word}: {count} vezes\n"
+        
+        # Adiciona gráfico de distribuição temporal (ASCII art simples)
+        report += "\n## 📊 Distribuição de Vídeos ao Longo do Tempo\n```\n"
+        
+        # Agrupa vídeos por ano
+        from collections import defaultdict
+        videos_by_year = defaultdict(int)
+        for date in dates:
+            year = date[:4]
+            videos_by_year[year] += 1
+        
+        # Cria gráfico ASCII simples
+        max_videos = max(videos_by_year.values())
+        for year, count in sorted(videos_by_year.items()):
+            bar_length = int((count / max_videos) * 50)
+            report += f"{year} | {'█' * bar_length} {count}\n"
+        
+        report += "```\n"
+        
+        # Adiciona insights finais
+        report += f"""
+## 💡 Insights
+
+1. **Crescimento do Canal** 🚀
+   - O canal tem mantido uma presença ativa por {days_between//365} anos e {(days_between%365)//30} meses
+   - Média de {int(avg_views):,} visualizações por vídeo demonstra uma audiência consistente
+
+2. **Engajamento da Audiência** 👥
+   - Taxa média de {(avg_likes/avg_views)*100:.2f}% de likes por visualização
+   - Aproximadamente {(avg_comments/avg_views)*100:.2f}% dos espectadores comentam nos vídeos
+
+3. **Consistência de Conteúdo** 📈
+   - Mantém uma frequência regular de {posts_per_week:.1f} vídeos por semana
+   - {sucessos_com_transcricao/total_videos*100:.1f}% dos vídeos possuem transcrição disponível
+
+## 🏆 Recordes do Canal
+
+- Vídeo Mais Antigo: {oldest_date} 📅
+- Vídeo Mais Recente: {newest_date} 🆕
+
+---
+*Relatório gerado automaticamente em {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}* ⚡
+"""
+        
+        # Salva o relatório
+        report_file = os.path.join(output_dir, f"{channel_name}_analise.md")
+        with open(report_file, 'w', encoding='utf-8') as f:
+            f.write(report)
+        
+        return True
+    except Exception as e:
+        print(f"Erro ao gerar análise do canal: {str(e)}")
+        return False
 
 def main():
     API_KEY = 'AIzaSyCItptfGsY26-Ux94bH2-FpfyO5VpoDxhs'
@@ -320,6 +470,9 @@ def main():
     videos = get_video_ids(youtube, channel_id)
     total_videos = len(videos)
     
+    # Lista para armazenar detalhes de todos os vídeos
+    all_video_details = []
+    
     # Contadores
     sucessos_com_transcricao = 0
     sucessos_sem_transcricao = 0
@@ -332,6 +485,9 @@ def main():
             video_details = get_video_details(youtube, video_id)
             if not video_details:
                 continue
+            
+            # Adiciona à lista de detalhes
+            all_video_details.append(video_details)
             
             comments = get_video_comments(youtube, video_id) if include_comments else []
             
@@ -363,7 +519,17 @@ def main():
         
         time.sleep(0.5)
     
-     # Relatório final
+    # Gera análise detalhada do canal
+    print("\nGerando análise detalhada do canal...")
+    generate_channel_analysis(
+        all_video_details,
+        channel_name,
+        sucessos_com_transcricao,
+        sucessos_sem_transcricao,
+        output_dir
+    )
+    
+    # Relatório final
     print("\n=== Relatório Final ===")
     print(f"Canal: {channel_name}")
     print(f"Total de vídeos processados: {total_videos}")
@@ -381,6 +547,7 @@ def main():
     print(f"\nArquivos salvos em: {output_dir}")
     print(f"- Vídeos com transcrição: {os.path.join(output_dir, 'Com Transcrição')}")
     print(f"- Vídeos sem transcrição: {os.path.join(output_dir, 'Sem Transcrição')}")
+    print(f"- Análise detalhada: {os.path.join(output_dir, f'{channel_name}_analise.md')}")
 
 if __name__ == "__main__":
     main()
